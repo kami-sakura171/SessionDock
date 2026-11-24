@@ -1,6 +1,6 @@
 {
   "name": "session-dock",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "SessionDock — Unified local session manager for AI coding agents",
   "main": "electron/main.js",

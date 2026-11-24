@@ -35,15 +35,38 @@ export type PlatformInfo = {
   error: string | null;
 };
 
+export type DirItem = {
+  name: string;
+  path: string;
+  isDir: boolean;
+  size: number;
+  mtime: number | null;
+};
+
+export type DirListing = {
+  current: string;
+  parent: string | null;
+  items: DirItem[];
+  shortcuts: { label: string; path: string }[];
+  drives: string[];
+};
+
 type DesktopApi = {
   listSessions: (force?: boolean) => Promise<{ sessions: Session[]; platforms: PlatformInfo[] }>;
   readSession: (platform: string, id: string) => Promise<Message[]>;
   exportMarkdown: (platform: string, id: string, title: string) => Promise<string>;
-  exportFile: (platform: string, id: string, title: string) => Promise<{ path: string; bytes: number }>;
+  exportFile: (
+    platform: string,
+    id: string,
+    title: string,
+    targetPath?: string,
+  ) => Promise<{ path: string; bytes: number }>;
   reveal: (filePath: string) => Promise<boolean>;
+  listDir: (dirPath?: string) => Promise<DirListing>;
+  mkdir: (parentDir: string, name: string) => Promise<string>;
   archive: (platform: string, id: string, value: boolean) => Promise<boolean>;
   archiveMany: (items: { platform: string; id: string }[], value: boolean) => Promise<number>;
-  exportMany: (items: Session[]) => Promise<{ ok: number; fail: number; dir: string }>;
+  exportMany: (items: Session[], targetDir?: string) => Promise<{ ok: number; fail: number; dir: string }>;
   removeMany: (
     items: Session[],
     options?: { exportFirst?: boolean },
@@ -80,13 +103,15 @@ export const onSessionsUpdated = (cb: (data: { sessions: Session[]; platforms: P
 export const readSession = (platform: string, id: string) => window.api.readSession(platform, id);
 export const exportMarkdown = (platform: string, id: string, title: string) =>
   window.api.exportMarkdown(platform, id, title);
-export const exportFile = (platform: string, id: string, title: string) =>
-  window.api.exportFile(platform, id, title);
+export const exportFile = (platform: string, id: string, title: string, targetPath?: string) =>
+  window.api.exportFile(platform, id, title, targetPath);
 export const reveal = (filePath: string) => window.api.reveal(filePath);
+export const listDir = (dirPath?: string) => window.api.listDir(dirPath);
+export const mkdir = (parentDir: string, name: string) => window.api.mkdir(parentDir, name);
 export const archive = (platform: string, id: string, value: boolean) => window.api.archive(platform, id, value);
 export const archiveMany = (items: { platform: string; id: string }[], value: boolean) =>
   window.api.archiveMany(items, value);
-export const exportMany = (items: Session[]) => window.api.exportMany(items);
+export const exportMany = (items: Session[], targetDir?: string) => window.api.exportMany(items, targetDir);
 export const removeMany = (items: Session[], options?: { exportFirst?: boolean }) =>
   window.api.removeMany(items, options);
 export const remove = (

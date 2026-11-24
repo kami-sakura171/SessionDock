@@ -216,20 +216,21 @@ ipcMain.handle("sessions:archive-many", async (_e, items, value) => {
   return items.length;
 });
 
-ipcMain.handle("sessions:export-many", async (_e, items) => {
+ipcMain.handle("sessions:export-many", async (_e, items, targetDir) => {
   let ok = 0;
   let fail = 0;
   const s = getSessions();
+  const outDir = targetDir || EXPORT_DIR();
   for (const it of items) {
     try {
       const md = s.exportMarkdown(it.platform, it.id, it.title);
-      writeExport(it.platform, it.id, it.title, md);
+      writeExport(it.platform, it.id, it.title, md, outDir);
       ok++;
     } catch {
       fail++;
     }
   }
-  return { ok, fail, dir: EXPORT_DIR() };
+  return { ok, fail, dir: outDir };
 });
 
 ipcMain.handle("sessions:delete-many", async (_e, items, options) => {
@@ -282,9 +283,9 @@ function safeName(s) {
   return String(s || "session").replace(/[\\/:*?"<>|\r\n\t]+/g, "_").slice(0, 60);
 }
 
-/** 导出到应用自己的目录，不弹系统对话框；重名时自动加时间戳 */
-function writeExport(platform, id, title, content) {
-  const dir = EXPORT_DIR();
+/** 导出到指定目录或默认导出目录；重名时自动加时间戳 */
+function writeExport(platform, id, title, content, targetDir) {
+  const dir = targetDir || EXPORT_DIR();
   fs.mkdirSync(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 16);
   const file = path.join(dir, `${safeName(title)}_${platform}_${stamp}.md`);
@@ -292,9 +293,91 @@ function writeExport(platform, id, title, content) {
   return { path: file, bytes: Buffer.byteLength(content, "utf8") };
 }
 
-ipcMain.handle("file:export", async (_e, platform, id, title) => {
+ipcMain.handle("file:export", async (_e, platform, id, title, targetPath) => {
   const md = getSessions().exportMarkdown(platform, id, title);
+  if (targetPath) {
+    const resolved = path.resolve(String(targetPath));
+    fs.mkdirSync(path.dirname(resolved), { recursive: true });
+    fs.writeFileSync(resolved, md, "utf8");
+    return { path: resolved, bytes: Buffer.byteLength(md, "utf8") };
+  }
   return writeExport(platform, id, title, md);
+});
+
+function getDrives() {
+  const drives = [];
+  for (let c = 67; c <= 90; c++) {
+    const root = `${String.fromCharCode(c)}:\\`;
+    try {
+      if (fs.existsSync(root)) drives.push(root);
+    } catch {
+      /* ignore */
+    }
+  }
+  return drives;
+}
+
+ipcMain.handle("fs:list-dir", async (_e, dirPath) => {
+  const expDir = EXPORT_DIR();
+  fs.mkdirSync(expDir, { recursive: true });
+
+  let target = expDir;
+  if (dirPath && String(dirPath).trim()) {
+    const candidate = path.resolve(String(dirPath).trim());
+    if (!fs.existsSync(candidate)) throw new Error(`路径不存在：${candidate}`);
+    target = candidate;
+  }
+  const st = fs.statSync(target);
+  const current = st.isDirectory() ? target : path.dirname(target);
+  const parsed = path.parse(current);
+  const parent = current === parsed.root ? null : path.dirname(current);
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(current, { withFileTypes: true });
+  } catch (e) {
+    throw new Error(`无法读取目录：${e.message}`);
+  }
+
+  const items = [];
+  for (const e of entries) {
+    if (e.name.startsWith("$") || e.name === "System Volume Information") continue;
+    const isDir = e.isDirectory();
+    if (!isDir && !e.name.toLowerCase().endsWith(".md")) continue;
+    const full = path.join(current, e.name);
+    let mtime = null;
+    let size = 0;
+    try {
+      const s = fs.statSync(full);
+      mtime = s.mtimeMs;
+      size = s.size;
+    } catch {
+      continue;
+    }
+    items.push({ name: e.name, path: full, isDir, size, mtime });
+  }
+
+  items.sort((a, b) => {
+    if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+  });
+
+  const shortcuts = [
+    { label: "默认导出目录", path: expDir },
+    { label: "桌面", path: app.getPath("desktop") },
+    { label: "文档", path: app.getPath("documents") },
+    { label: "下载", path: app.getPath("downloads") },
+  ].filter((x, i, arr) => x.path && fs.existsSync(x.path) && arr.findIndex((y) => y.path === x.path) === i);
+
+  return { current, parent, items, shortcuts, drives: getDrives() };
+});
+
+ipcMain.handle("fs:mkdir", async (_e, parentDir, name) => {
+  const clean = String(name || "").replace(/[\\/:*?"<>|\r\n\t]+/g, "").trim();
+  if (!clean) throw new Error("文件夹名称不能为空");
+  const full = path.join(path.resolve(parentDir), clean);
+  fs.mkdirSync(full, { recursive: true });
+  return full;
 });
 
 ipcMain.handle("file:reveal", async (_e, filePath) => {

@@ -7,9 +7,51 @@ const path = require("node:path");
  *   - archived: 本地归档标记，用于「仅归档可删」这条规则
  *   - trash:    隔离区清单
  */
-// 沿用历史数据目录名，确保升级后已归档标记、隔离区备份与导出文件不丢失
-const root = () =>
-  path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), "chat-session-manager");
+const appDataBase = () =>
+  process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+
+const legacyRoot = () => path.join(appDataBase(), "chat-session-manager");
+const newRoot = () => path.join(appDataBase(), "session-dock");
+
+let migrated = false;
+function migrateLegacyRoot() {
+  if (migrated) return;
+  migrated = true;
+  const oldDir = legacyRoot();
+  const curDir = newRoot();
+  if (!fs.existsSync(oldDir) || fs.existsSync(path.join(curDir, "meta.json"))) return;
+
+  try {
+    fs.mkdirSync(curDir, { recursive: true });
+    for (const entry of ["meta.json", "trash", "exports", "cursor-titles.json", "pi-index.json", "sessions-cache.json"]) {
+      const src = path.join(oldDir, entry);
+      const dst = path.join(curDir, entry);
+      if (fs.existsSync(src) && !fs.existsSync(dst)) {
+        fs.cpSync(src, dst, { recursive: true });
+      }
+    }
+    // 同步更新 meta.json 里隔离区记录的目录路径
+    const mf = path.join(curDir, "meta.json");
+    if (fs.existsSync(mf)) {
+      const meta = JSON.parse(fs.readFileSync(mf, "utf8"));
+      if (Array.isArray(meta.trash)) {
+        for (const t of meta.trash) {
+          if (typeof t.dir === "string" && t.dir.startsWith(oldDir)) {
+            t.dir = curDir + t.dir.slice(oldDir.length);
+          }
+        }
+        fs.writeFileSync(mf, JSON.stringify(meta, null, 2), "utf8");
+      }
+    }
+  } catch {
+    /* 迁移失败时不阻塞启动 */
+  }
+}
+
+const root = () => {
+  migrateLegacyRoot();
+  return newRoot();
+};
 
 const metaFile = () => path.join(root(), "meta.json");
 const trashRoot = () => path.join(root(), "trash");

@@ -61,19 +61,20 @@ function list() {
   const db = open();
   if (!db) return [];
 
-  // 1) 会话头（313 条左右）
-  let headers = [];
   try {
-    headers = db
-      .prepare(
-        `select composerId, workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent, value
-           from composerHeaders
-          where composerId not like 'empty%'`
-      )
-      .all();
-  } catch {
-    return [];
-  }
+    // 1) 会话头（313 条左右）
+    let headers = [];
+    try {
+      headers = db
+        .prepare(
+          `select composerId, workspaceId, createdAt, lastUpdatedAt, isArchived, isSubagent, value
+             from composerHeaders
+            where composerId not like 'empty%'`
+        )
+        .all();
+    } catch {
+      return [];
+    }
 
   // 2) 气泡：一次扫完，按 composer 归组（用 key 解析，避免 5 万次解析大 JSON）
   const bubbleCount = new Map();
@@ -153,6 +154,13 @@ function list() {
       };
     })
     .filter((s) => s.messageCount > 0 || s.title !== "(未命名会话)");
+  } finally {
+    try {
+      db.close();
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 function read(id) {
@@ -166,6 +174,12 @@ function read(id) {
       .all(`bubbleId:${id}:%`);
   } catch {
     return [];
+  } finally {
+    try {
+      db.close();
+    } catch {
+      /* ignore */
+    }
   }
 
   const out = [];

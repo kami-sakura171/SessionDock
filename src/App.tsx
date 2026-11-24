@@ -17,6 +17,7 @@ import {
   trashRestore,
 } from "./api";
 import type { Message, PlatformInfo, Session, TrashItem } from "./api";
+import PathPickerModal from "./PathPickerModal";
 
 const Markdown = lazy(() => import("./Markdown"));
 
@@ -56,16 +57,15 @@ export default function App() {
   const mapRef = useRef<HTMLDivElement>(null);
   const tocListRef = useRef<HTMLDivElement>(null);
   const mapCloseTimer = useRef<number | null>(null);
+  const toastTimer = useRef<number | null>(null);
+  const scrollRaf = useRef<number>(0);
+  const manualJumpUntil = useRef<number>(0);
   const bodyRef = useRef<HTMLDivElement>(null);
   const drawerRef = useRef<HTMLElement>(null);
-  const headRef = useRef<HTMLDivElement>(null);
+  const guideRef = useRef<HTMLDivElement>(null);
   const [drawerWidth, setDrawerWidth] = useState<number>(() => {
     const saved = Number(localStorage.getItem("drawerWidth"));
     return Number.isFinite(saved) && saved >= 320 ? saved : 460;
-  });
-  const [headHeight, setHeadHeight] = useState<number>(() => {
-    const saved = Number(localStorage.getItem("headHeight"));
-    return Number.isFinite(saved) && saved >= 80 ? saved : 148;
   });
   const [exportFirst, setExportFirst] = useState(true);
   const [batch, setBatch] = useState(false);
@@ -74,6 +74,11 @@ export default function App() {
   const [confirmBox, setConfirmBox] = useState<
     { title: string; body: string; confirmText: string; danger?: boolean; exportOption?: boolean; run: () => void | Promise<void> } | null
   >(null);
+  const [pathPicker, setPathPicker] = useState<{
+    mode: "save-file" | "pick-dir";
+    defaultFileName?: string;
+    onConfirm: (targetPath: string) => Promise<void>;
+  } | null>(null);
 
   async function load(force = false) {
     setLoading(true);
@@ -125,7 +130,11 @@ export default function App() {
 
   function flash(msg: string) {
     setToast(msg);
-    setTimeout(() => setToast(""), 3000);
+    if (toastTimer.current !== null) window.clearTimeout(toastTimer.current);
+    toastTimer.current = window.setTimeout(() => {
+      toastTimer.current = null;
+      setToast("");
+    }, 3000);
   }
 
   // 主区与预览区之间的分隔条：拖动改宽度，双击复位，宽度记在本地
@@ -142,66 +151,41 @@ export default function App() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
 
-  useEffect(() => {
-    if (headHeight >= 80) localStorage.setItem("headHeight", String(Math.round(headHeight)));
-  }, [headHeight]);
-
-  /** 会话信息区与消息区之间的横向分隔条：拖拽期间直接操作 DOM + rAF 节流，松手再同步状态 */
-  function startResizeHead(e: ReactMouseEvent) {
-    e.preventDefault();
-    const startY = e.clientY;
-    const startHeight = headRef.current?.offsetHeight ?? headHeight;
-    let nextHeight = startHeight;
-    let raf = 0;
-
-    const apply = () => {
-      raf = 0;
-      if (headRef.current) headRef.current.style.height = `${nextHeight}px`;
-    };
-
-    const onMove = (ev: MouseEvent) => {
-      const max = Math.max(120, window.innerHeight - 260); // 至少给消息区留 260px
-      nextHeight = Math.min(Math.max(startHeight + (ev.clientY - startY), 80), max);
-      if (!raf) raf = window.requestAnimationFrame(apply);
-    };
-    const onUp = () => {
-      if (raf) window.cancelAnimationFrame(raf);
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      document.body.classList.remove("resizing-row");
-      if (headRef.current) headRef.current.style.height = `${nextHeight}px`;
-      setHeadHeight(nextHeight);
-    };
-
-    document.body.classList.add("resizing-row");
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }
-
+  /**
+   * 主区与预览区之间的分隔条：借鉴 VS Code / JetBrains 的辅助线拖拽模式，
+   * 拖拽过程中只用 GPU transform 移动 2px 指示线，零重排；松手时再一次性更新抽屉宽度。
+   */
   function startResize(e: ReactMouseEvent) {
     e.preventDefault();
     const startX = e.clientX;
     const startWidth = drawerRef.current?.offsetWidth ?? drawerWidth;
+    const minW = 320;
+    const maxW = Math.max(360, window.innerWidth - 520);
     let nextWidth = startWidth;
     let raf = 0;
 
-    const apply = () => {
+    const guide = guideRef.current;
+    const initialLeft = window.innerWidth - startWidth;
+    if (guide) {
+      guide.style.display = "block";
+      guide.style.transform = `translateX(${initialLeft}px)`;
+    }
+
+    const applyGuide = () => {
       raf = 0;
-      if (drawerRef.current) drawerRef.current.style.width = `${nextWidth}px`;
+      if (guide) guide.style.transform = `translateX(${window.innerWidth - nextWidth}px)`;
     };
 
     const onMove = (ev: MouseEvent) => {
-      // 预览区在右侧，向左拖变宽；上限留 520px 给主表格，下限 320px
-      const max = Math.max(360, window.innerWidth - 520);
-      nextWidth = Math.min(Math.max(startWidth + (startX - ev.clientX), 320), max);
-      if (!raf) raf = window.requestAnimationFrame(apply);
+      nextWidth = Math.min(Math.max(startWidth + (startX - ev.clientX), minW), maxW);
+      if (!raf) raf = window.requestAnimationFrame(applyGuide);
     };
     const onUp = () => {
       if (raf) window.cancelAnimationFrame(raf);
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       document.body.classList.remove("resizing");
-      if (drawerRef.current) drawerRef.current.style.width = `${nextWidth}px`;
+      if (guide) guide.style.display = "none";
       setDrawerWidth(nextWidth);
     };
 
@@ -232,7 +216,14 @@ export default function App() {
       messages
         .map((m, i) => ({ m, i }))
         .filter((x) => x.m.role === "user")
-        .map((x, n) => ({ no: n + 1, index: x.i, text: x.m.text.replace(/\s+/g, " ").trim() })),
+        .map((x, n) => ({
+          no: n + 1,
+          index: x.i,
+          text: x.m.text
+            .replace(/<\/?command-[a-z-]+>/g, " ")
+            .replace(/\s+/g, " ")
+            .trim(),
+        })),
     [messages]
   );
 
@@ -284,6 +275,8 @@ export default function App() {
   function jumpTo(index: number) {
     const body = bodyRef.current;
     if (!body) return;
+    manualJumpUntil.current = Date.now() + 550;
+    setActiveIdx(index);
     const el = body.querySelector(`[data-idx="${index}"]`) as HTMLElement | null;
     el?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
@@ -301,20 +294,40 @@ export default function App() {
     const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [turns.length, drawerWidth, headHeight]);
+  }, [turns.length, drawerWidth]);
 
-  /** 滚动时高亮当前顶部的消息（用户或助手都算） */
+  /** 滚动时高亮当前顶部的消息：rAF 节流 + 二分查找，长会话下避免全量 getBoundingClientRect */
   function onBodyScroll() {
-    const body = bodyRef.current;
-    if (!body) return;
-    const top = body.getBoundingClientRect().top + 16;
-    const nodes = body.querySelectorAll("[data-idx]");
-    let current = -1;
-    nodes.forEach((node) => {
-      const el = node as HTMLElement;
-      if (el.getBoundingClientRect().top <= top) current = Number(el.dataset.idx);
+    if (scrollRaf.current) return;
+    scrollRaf.current = window.requestAnimationFrame(() => {
+      scrollRaf.current = 0;
+      if (Date.now() < manualJumpUntil.current) return;
+      const body = bodyRef.current;
+      if (!body) return;
+      const nodes = body.querySelectorAll<HTMLElement>("[data-idx]");
+      if (nodes.length === 0) return;
+
+      // 已经滚到底部时，底部最后一条往往顶不到视口最上方，直接高亮最后一条
+      if (body.scrollHeight > body.clientHeight && body.scrollTop + body.clientHeight >= body.scrollHeight - 4) {
+        setActiveIdx(Number(nodes[nodes.length - 1].dataset.idx));
+        return;
+      }
+
+      const top = body.getBoundingClientRect().top + 16;
+      let lo = 0;
+      let hi = nodes.length - 1;
+      let current = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (nodes[mid].getBoundingClientRect().top <= top) {
+          current = Number(nodes[mid].dataset.idx);
+          lo = mid + 1;
+        } else {
+          hi = mid - 1;
+        }
+      }
+      setActiveIdx(current);
     });
-    setActiveIdx(current);
   }
 
 
@@ -418,14 +431,24 @@ export default function App() {
     }
   }
 
-  async function saveMarkdown() {
+  function saveMarkdown() {
     if (!selected) return;
-    try {
-      const res = await exportFile(selected.platform, selected.id, selected.title);
-      flash(`已导出（${(res.bytes / 1024).toFixed(1)} KB）\n${res.path}`);
-    } catch (e) {
-      flash(`导出失败：${friendly(e)}`);
-    }
+    const target = selected;
+    const safe = (target.title || "session").replace(/[\\/:*?"<>|\r\n\t]+/g, "_").slice(0, 60);
+    const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 16);
+    setPathPicker({
+      mode: "save-file",
+      defaultFileName: `${safe}_${target.platform}_${stamp}.md`,
+      onConfirm: async (targetPath) => {
+        try {
+          const res = await exportFile(target.platform, target.id, target.title, targetPath);
+          setPathPicker(null);
+          flash(`已导出（${(res.bytes / 1024).toFixed(1)} KB）\n${res.path}`);
+        } catch (e) {
+          flash(`导出失败：${friendly(e)}`);
+        }
+      },
+    });
   }
 
   const total = platforms.reduce((n, p) => n + p.count, 0);
@@ -516,11 +539,21 @@ export default function App() {
                   归档
                 </button>
                 <button
-                  onClick={async () => {
+                  onClick={() => {
                     if (picked.size === 0) return;
                     const items = sessions.filter((x) => picked.has(keyOf(x)));
-                    const res = await exportMany(items);
-                    flash(`已导出 ${res.ok} 个${res.fail ? `，失败 ${res.fail} 个` : ""}\n${res.dir}`);
+                    setPathPicker({
+                      mode: "pick-dir",
+                      onConfirm: async (targetDir) => {
+                        try {
+                          const res = await exportMany(items, targetDir);
+                          setPathPicker(null);
+                          flash(`已导出 ${res.ok} 个${res.fail ? `，失败 ${res.fail} 个` : ""}\n${res.dir}`);
+                        } catch (e) {
+                          flash(`导出失败：${friendly(e)}`);
+                        }
+                      },
+                    });
                   }}
                 >
                   导出
@@ -584,12 +617,12 @@ export default function App() {
                       />
                     </th>
                   )}
-                  <th style={{ width: "44%" }}>标题</th>
-                  <th>平台</th>
+                  <th style={{ width: "42%" }}>标题</th>
+                  <th style={{ width: 96 }}>平台</th>
                   <th>项目</th>
                   <th style={{ width: 56 }}>消息</th>
-                  <th style={{ width: 126 }}>更新时间</th>
-                  <th style={{ width: 46 }}>状态</th>
+                  <th style={{ width: 128 }}>更新时间</th>
+                  <th style={{ width: 72 }}>状态</th>
                 </tr>
               </thead>
               <tbody>
@@ -641,7 +674,7 @@ export default function App() {
               title="拖动调整宽度，双击复位"
             />
             <aside className="drawer" ref={drawerRef} style={{ width: drawerWidth }}>
-            <div className="drawer-head" ref={headRef} style={{ height: headHeight }}>
+            <div className="drawer-head">
               <div className="drawer-top">
                 <h3>{selected.title}</h3>
                 <button className="icon-btn" onClick={() => setSelected(null)} title="关闭预览">✕</button>
@@ -661,12 +694,6 @@ export default function App() {
                 </button>
               </div>
             </div>
-            <div
-              className="splitter-h"
-              onMouseDown={startResizeHead}
-              onDoubleClick={() => setHeadHeight(148)}
-              title="拖动调整信息区高度，双击复位"
-            />
             <div className="drawer-content">
               <div
                 className="drawer-body"
@@ -857,9 +884,20 @@ export default function App() {
         </div>
       )}
 
+      {pathPicker && (
+        <PathPickerModal
+          mode={pathPicker.mode}
+          defaultFileName={pathPicker.defaultFileName}
+          onCancel={() => setPathPicker(null)}
+          onConfirm={pathPicker.onConfirm}
+        />
+      )}
+
       {toast && (
         <div className="toast">{toast}</div>
       )}
+
+      <div className="splitter-guide" ref={guideRef} style={{ display: "none" }} />
     </div>
   );
 }

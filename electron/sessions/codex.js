@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const store = require("../store");
 
 let DatabaseSync = null;
 try {
@@ -13,6 +14,59 @@ try {
 
 const codexHome = () =>
   process.env.CODEX_HOME || path.join(process.env.USERPROFILE || os.homedir(), ".codex");
+
+const rolloutIndexPath = () => path.join(store.root(), "codex-rollout-index.json");
+
+function loadRolloutIndex() {
+  try {
+    return JSON.parse(fs.readFileSync(rolloutIndexPath(), "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveRolloutIndex(idx) {
+  try {
+    fs.mkdirSync(store.root(), { recursive: true });
+    fs.writeFileSync(rolloutIndexPath(), JSON.stringify(idx), "utf8");
+  } catch {
+    /* ignore */
+  }
+}
+
+function collectRolloutFiles(home) {
+  const out = [];
+  for (const sub of ["sessions", "archived_sessions"]) {
+    const stack = [path.join(home, sub)];
+    while (stack.length) {
+      const dir = stack.pop();
+      let entries = [];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) stack.push(full);
+        else if (e.name.endsWith(".jsonl")) out.push(full);
+      }
+    }
+  }
+  return out;
+}
+
+/** 统一把秒 / 毫秒 / ISO 字符串转成毫秒时间戳 */
+function normalizeTs(v) {
+  if (v == null || v === "") return null;
+  if (typeof v === "number" || /^\d+(\.\d+)?$/.test(String(v).trim())) {
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return n < 1e11 ? Math.round(n * 1000) : Math.round(n);
+  }
+  const parsed = Date.parse(String(v));
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
 
 /** 库文件名带版本号（state_5 / thread_history_1），取数字最大的那个 */
 function latestDb(dir, prefix) {
@@ -38,7 +92,7 @@ function latestDb(dir, prefix) {
 function openReadOnly(file) {
   if (!DatabaseSync) return null;
   try {
-    return { db: new DatabaseSync(file, { readOnly: true }), copied: false };
+    return { db: new DatabaseSync(file, { readOnly: true }), tmpDir: null };
   } catch {
     try {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "csm-"));
@@ -47,9 +101,25 @@ function openReadOnly(file) {
       for (const suffix of ["-wal", "-shm"]) {
         if (fs.existsSync(file + suffix)) fs.copyFileSync(file + suffix, tmp + suffix);
       }
-      return { db: new DatabaseSync(tmp, { readOnly: true }), copied: true };
+      return { db: new DatabaseSync(tmp, { readOnly: true }), tmpDir };
     } catch {
       return null;
+    }
+  }
+}
+
+function closeDb(handle) {
+  if (!handle) return;
+  try {
+    handle.db.close();
+  } catch {
+    /* ignore */
+  }
+  if (handle.tmpDir) {
+    try {
+      fs.rmSync(handle.tmpDir, { recursive: true, force: true });
+    } catch {
+      /* ignore */
     }
   }
 }
@@ -90,6 +160,8 @@ function list() {
         for (const r of rows) counts.set(r.thread_id, r.c);
       } catch {
         /* 老版本没有该表，忽略 */
+      } finally {
+        closeDb(hist);
       }
     }
   }
@@ -99,46 +171,115 @@ function list() {
 
   let rows = [];
   try {
+    const cols = new Set(state.db.prepare("pragma table_info(threads)").all().map((c) => c.name));
+    const sel = (col, alias) => (cols.has(col) ? `t.${col}${alias ? ` as ${alias}` : ""}` : `null as ${alias || col}`);
+    const orderCol = cols.has("updated_at_ms") ? "t.updated_at_ms" : cols.has("updated_at") ? "t.updated_at" : "t.created_at";
+    const hasProjects = !!state.db.prepare("select name from sqlite_master where type='table' and name='projects'").get();
+    const joinSql = hasProjects && cols.has("project_id")
+      ? "left join projects p on p.id = t.project_id"
+      : "";
+    const projCol = hasProjects && cols.has("project_id") ? "p.name as project" : "null as project";
+
+    const whereParts = [];
+    if (cols.has("thread_source")) whereParts.push("coalesce(t.thread_source, '') != 'guardian_review'");
+    if (cols.has("source")) whereParts.push("coalesce(t.source, '') not like '{\"subagent\":%'");
+    const whereSql = whereParts.length ? `where ${whereParts.join(" and ")}` : "";
+
     rows = state.db
       .prepare(
-        `select t.id, t.name, t.title, t.archived, t.created_at_ms, t.updated_at_ms,
-                t.creator_account_id, t.cwd, p.name as project
-           from threads t left join projects p on p.id = t.project_id
-          order by t.updated_at_ms desc`
+        `select t.id, ${sel("name")}, ${sel("title")}, ${sel("archived")},
+                ${sel("created_at")}, ${sel("updated_at")},
+                ${sel("created_at_ms")}, ${sel("updated_at_ms")},
+                ${sel("creator_account_id")}, ${sel("cwd")}, ${sel("rollout_path")}, ${projCol}
+           from threads t ${joinSql}
+          ${whereSql}
+          order by ${orderCol} desc`
       )
       .all();
   } catch {
     return [];
+  } finally {
+    closeDb(state);
   }
 
-  return rows.map((r) => ({
-    id: r.id,
-    platform: "codex",
-    title: cleanTitle(r.name) || cleanTitle(r.title) || "(无标题)",
-    project: r.project || null,
-    cwd: r.cwd ? String(r.cwd).replace(/^\\\\\?\\/, "") : null,
-    createdAt: r.created_at_ms || null,
-    updatedAt: r.updated_at_ms || null,
-    messageCount: counts.get(r.id) || 0,
-    archived: !!r.archived,
-    account: r.creator_account_id || null,
-    path: stateFile,
-  }));
+  // 按 rollout 文件的 mtime 缓存消息数与最后时间，保证列表消息数、时间与详情页完全同步
+  const rIndex = loadRolloutIndex();
+  let rDirty = false;
+  let allRollouts = null;
+
+  const resolveRollout = (r) => {
+    if (r.rollout_path) {
+      const rp = String(r.rollout_path).replace(/^\\\\\?\\/, "");
+      if (fs.existsSync(rp)) return rp;
+    }
+    if (allRollouts === null) allRollouts = collectRolloutFiles(home);
+    return allRollouts.find((f) => path.basename(f).includes(r.id)) || null;
+  };
+
+  const result = rows.map((r) => {
+    const createdAt = normalizeTs(r.created_at_ms) || normalizeTs(r.created_at);
+    let updatedAt = normalizeTs(r.updated_at_ms) || normalizeTs(r.updated_at) || createdAt;
+    let messageCount = counts.get(r.id) || 0;
+
+    const rp = resolveRollout(r);
+    if (rp) {
+      try {
+        const st = fs.statSync(rp);
+        let entry = rIndex[rp];
+        if (!entry || entry.mtime !== st.mtimeMs) {
+          const msgs = readFromRollout(rp);
+          const lastTs = msgs.length ? msgs[msgs.length - 1].timestamp : null;
+          entry = { mtime: st.mtimeMs, count: msgs.length, lastTs };
+          rIndex[rp] = entry;
+          rDirty = true;
+        }
+        if (entry.count > messageCount) messageCount = entry.count;
+        if (entry.lastTs && (!updatedAt || entry.lastTs > updatedAt)) updatedAt = entry.lastTs;
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const cwd = r.cwd ? String(r.cwd).replace(/^\\\\\?\\/, "") : null;
+    return {
+      id: r.id,
+      platform: "codex",
+      title: cleanTitle(r.name) || cleanTitle(r.title) || "(无标题)",
+      project: r.project || (cwd ? path.basename(cwd) || null : null),
+      cwd,
+      createdAt,
+      updatedAt,
+      messageCount,
+      archived: !!r.archived,
+      account: r.creator_account_id || null,
+      path: stateFile,
+    };
+  });
+
+  if (rDirty) saveRolloutIndex(rIndex);
+  return result;
 }
 
-function read(id) {
+function readFromHistory(id) {
   const histFile = latestDb(codexHome(), "thread_history_");
   if (!histFile) return [];
   const hist = openReadOnly(histFile);
   if (!hist) return [];
 
-  const rows = hist.db
-    .prepare(
-      `select item_type, item_json, created_at_ms from thread_items
-        where thread_id = ? and item_type in ('userMessage','agentMessage')
-        order by created_at_ms`
-    )
-    .all(id);
+  let rows = [];
+  try {
+    rows = hist.db
+      .prepare(
+        `select item_type, item_json, created_at_ms from thread_items
+          where thread_id = ? and item_type in ('userMessage','agentMessage')
+          order by created_at_ms`
+      )
+      .all(id);
+  } catch {
+    return [];
+  } finally {
+    closeDb(hist);
+  }
 
   const out = [];
   for (const r of rows) {
@@ -153,19 +294,127 @@ function read(id) {
     out.push({
       role: r.item_type === "userMessage" ? "user" : "assistant",
       text: text.trim(),
-      timestamp: r.created_at_ms || null,
+      timestamp: normalizeTs(r.created_at_ms),
     });
   }
   return out;
 }
 
-/** Codex 把附件清单塞进正文，压成「📎 文件名 + 真正请求」 */
-function userText(d) {
-  const raw = (d.content || [])
-    .map((c) => (c && c.type === "text" ? c.text : c && c.type === "image" ? "[图片]" : ""))
-    .filter(Boolean)
-    .join("\n");
+function findRolloutPath(id) {
+  const home = codexHome();
+  const stateFile = latestDb(home, "state_");
+  if (stateFile) {
+    const state = openReadOnly(stateFile);
+    if (state) {
+      try {
+        const row = state.db.prepare("select rollout_path from threads where id = ?").get(id);
+        if (row && row.rollout_path) {
+          const rp = String(row.rollout_path).replace(/^\\\\\?\\/, "");
+          if (fs.existsSync(rp)) return rp;
+        }
+      } catch {
+        /* ignore */
+      } finally {
+        closeDb(state);
+      }
+    }
+  }
 
+  // 兜底：在 sessions / archived_sessions 目录按会话 id 查找 rollout-*.jsonl
+  for (const sub of ["sessions", "archived_sessions"]) {
+    const base = path.join(home, sub);
+    const stack = [base];
+    while (stack.length) {
+      const dir = stack.pop();
+      let entries = [];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) stack.push(full);
+        else if (e.name.endsWith(".jsonl") && e.name.includes(id)) return full;
+      }
+    }
+  }
+  return null;
+}
+
+function cleanRolloutUserText(raw) {
+  let s = String(raw || "")
+    .replace(/<environment_context>[\s\S]*?<\/environment_context>/g, "")
+    .replace(/<codex_internal_context[\s\S]*?<\/codex_internal_context>/g, "")
+    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/g, "")
+    .replace(/<permissions instructions>[\s\S]*?<\/permissions instructions>/g, "")
+    .replace(/<collaboration_mode>[\s\S]*?<\/collaboration_mode>/g, "")
+    .trim();
+  if (!s) return "";
+  return formatAttachedFiles(s);
+}
+
+function readFromRollout(rp) {
+  let raw = "";
+  try {
+    raw = fs.readFileSync(rp, "utf8");
+  } catch {
+    return [];
+  }
+
+  const respMsgs = [];
+  const evtMsgs = [];
+
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    let d;
+    try {
+      d = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const ts = normalizeTs(d.timestamp);
+
+    if (d.type === "response_item" && d.payload && d.payload.type === "message") {
+      const role = d.payload.role;
+      if (role !== "user" && role !== "assistant") continue;
+      const parts = Array.isArray(d.payload.content) ? d.payload.content : [];
+      const joined = parts
+        .map((c) => {
+          if (!c) return "";
+          if (typeof c.text === "string") return c.text;
+          if (c.type === "image" || c.type === "input_image") return "[图片]";
+          return "";
+        })
+        .filter(Boolean)
+        .join("\n");
+      const text = role === "user" ? cleanRolloutUserText(joined) : joined.trim();
+      if (text) respMsgs.push({ role, text, timestamp: ts });
+    } else if (d.type === "event_msg" && d.payload) {
+      if (d.payload.type === "user_message") {
+        const text = cleanRolloutUserText(d.payload.message || d.payload.text || "");
+        if (text) evtMsgs.push({ role: "user", text, timestamp: ts });
+      } else if (d.payload.type === "agent_message") {
+        const text = String(d.payload.message || d.payload.text || "").trim();
+        if (text) evtMsgs.push({ role: "assistant", text, timestamp: ts });
+      }
+    }
+  }
+
+  return respMsgs.length > 0 ? respMsgs : evtMsgs;
+}
+
+function read(id) {
+  const histMsgs = readFromHistory(id);
+  const rp = findRolloutPath(id);
+  if (rp) {
+    const rolloutMsgs = readFromRollout(rp);
+    if (rolloutMsgs.length > histMsgs.length) return rolloutMsgs;
+  }
+  return histMsgs;
+}
+
+function formatAttachedFiles(raw) {
   if (raw.includes("# Files mentioned by the user:") && raw.includes("## My request:")) {
     const idx = raw.indexOf("## My request:");
     const head = raw.slice(0, idx);
@@ -178,6 +427,16 @@ function userText(d) {
     if (files.length) return files.map((f) => `📎 ${f}`).join("\n") + "\n\n" + req;
   }
   return raw;
+}
+
+/** Codex 把附件清单塞进正文，压成「📎 文件名 + 真正请求」 */
+function userText(d) {
+  const raw = (d.content || [])
+    .map((c) => (c && c.type === "text" ? c.text : c && c.type === "image" ? "[图片]" : ""))
+    .filter(Boolean)
+    .join("\n");
+
+  return formatAttachedFiles(raw);
 }
 
 module.exports = { list, read, available: () => !!DatabaseSync };
