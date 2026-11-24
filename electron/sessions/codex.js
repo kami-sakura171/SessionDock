@@ -127,7 +127,26 @@ function list() {
 }
 
 function read(id) {
-  const histFile = latestDb(codexHome(), "thread_history_");
+  const home = codexHome();
+
+  // 若存在 rollout 文件，优先读取完整历史（新版 Codex / 长对话通常写入 rollout.jsonl）
+  const stateFile = latestDb(home, "state_");
+  if (stateFile) {
+    const state = openReadOnly(stateFile);
+    if (state) {
+      try {
+        const row = state.db.prepare("select rollout_path from threads where id = ?").get(id);
+        if (row && row.rollout_path) {
+          const rolloutMsgs = readFromRollout(row.rollout_path);
+          if (rolloutMsgs.length > 0) return rolloutMsgs;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  const histFile = latestDb(home, "thread_history_");
   if (!histFile) return [];
   const hist = openReadOnly(histFile);
   if (!hist) return [];
@@ -159,10 +178,53 @@ function read(id) {
   return out;
 }
 
+/** 从 Codex rollout JSONL 日志中解析完整消息流 */
+function readFromRollout(file) {
+  if (!file) return [];
+  const p = String(file).replace(/^\\\\\?\\/, "");
+  if (!fs.existsSync(p)) return [];
+  let content = "";
+  try {
+    content = fs.readFileSync(p, "utf8");
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const line of content.split("\n")) {
+    if (!line.includes('"response_item"') || !line.includes('"message"')) continue;
+    let obj;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const payload = obj && obj.payload;
+    if (!obj || obj.type !== "response_item" || !payload || payload.type !== "message") continue;
+    const isUser = payload.role === "user";
+    const text = isUser
+      ? userText(payload)
+      : (payload.content || [])
+          .map((c) => (c && (c.text || c.input_text) ? (c.text || c.input_text) : ""))
+          .filter(Boolean)
+          .join("\n");
+    if (!text.trim()) continue;
+    // 过滤内部系统注入块（客户端时区、运行环境上下文、插件更新通知等）
+    if (!isUser && /^<(?:codex_apps_client_time_context|environment_context|skills_instructions|tools)\b/.test(text.trim())) {
+      continue;
+    }
+    out.push({
+      role: isUser ? "user" : "assistant",
+      text: text.trim(),
+      timestamp: obj.timestamp ? new Date(obj.timestamp).getTime() : null,
+    });
+  }
+  return out;
+}
+
 /** Codex 把附件清单塞进正文，压成「📎 文件名 + 真正请求」 */
 function userText(d) {
   const raw = (d.content || [])
-    .map((c) => (c && c.type === "text" ? c.text : c && c.type === "image" ? "[图片]" : ""))
+    .map((c) => (c && (c.type === "text" || c.type === "input_text") ? (c.text || "") : c && c.type === "image" ? "[图片]" : ""))
     .filter(Boolean)
     .join("\n");
 
