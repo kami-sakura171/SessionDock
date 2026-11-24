@@ -1,0 +1,13 @@
+node_modules/
+dist/
+release/
+
+# Local preview / screenshot scratch files
+.*-preview.html
+.*-shot.png
+.*-zoom.png
+
+# Logs & OS files
+*.log
+.DS_Store
+Thumbs.db
