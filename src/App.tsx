@@ -521,10 +521,10 @@ export default function App() {
     if (!selected) return;
     const target = selected;
     const safe = (target.title || "session").replace(/[\\/:*?"<>|\r\n\t]+/g, "_").slice(0, 60);
-    const stamp = new Date().toISOString().replace(/[:T]/g, "-").slice(0, 16);
+    const safeId = (target.id || "unknown").replace(/[\\/:*?"<>|\r\n\t]+/g, "_").slice(0, 80);
     setPathPicker({
       mode: "save-file",
-      defaultFileName: `${safe}_${target.platform}_${stamp}.md`,
+      defaultFileName: `${safe}_${target.platform}_${safeId}.md`,
       onConfirm: async (targetPath) => {
         try {
           const res = await exportFile(target.platform, target.id, target.title, targetPath);

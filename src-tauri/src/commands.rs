@@ -194,12 +194,25 @@ fn safe_name(s: &str) -> String {
     sessions::take_chars(&cleaned, 60)
 }
 
-/// 导出到指定目录或默认导出目录；重名时自动加时间戳
-fn write_export(platform: &str, title: &str, content: &str, target_dir: Option<PathBuf>) -> Result<ExportResult, String> {
+fn safe_id(s: &str) -> String {
+    static RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"[\\/:*?"<>|\r\n\t]+"#).expect("safe id regex")
+    });
+    let cleaned = RE.replace_all(if s.is_empty() { "unknown" } else { s }, "_");
+    sessions::take_chars(&cleaned, 80)
+}
+
+/// 导出到指定目录或默认导出目录；以会话 id 结尾避免同标题会话互相覆盖
+fn write_export(
+    platform: &str,
+    id: &str,
+    title: &str,
+    content: &str,
+    target_dir: Option<PathBuf>,
+) -> Result<ExportResult, String> {
     let dir = target_dir.unwrap_or_else(export_dir);
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let stamp = chrono::Utc::now().format("%Y-%m-%d-%H-%M").to_string();
-    let file = dir.join(format!("{}_{platform}_{stamp}.md", safe_name(title)));
+    let file = dir.join(format!("{}_{platform}_{}.md", safe_name(title), safe_id(id)));
     fs::write(&file, content).map_err(|e| e.to_string())?;
     Ok(ExportResult {
         path: file.to_string_lossy().to_string(),
@@ -235,7 +248,7 @@ pub fn file_export(
             bytes: md.len(),
         });
     }
-    write_export(&platform, &title, &md, None)
+    write_export(&platform, &id, &title, &md, None)
 }
 
 #[tauri::command(async)]
@@ -249,7 +262,7 @@ pub fn sessions_export_many(items: Vec<Session>, target_dir: Option<String>) -> 
     for it in &items {
         let attempt = (|| -> Result<(), String> {
             let md = sessions::export_markdown(&it.platform, &it.id, &it.title)?;
-            write_export(&it.platform, &it.title, &md, Some(out_dir.clone()))?;
+            write_export(&it.platform, &it.id, &it.title, &md, Some(out_dir.clone()))?;
             Ok(())
         })();
         match attempt {
@@ -305,7 +318,7 @@ pub fn sessions_delete(
     let mut exported = None;
     if export_first {
         let md = sessions::export_markdown(&platform, &id, &session.title)?;
-        exported = Some(write_export(&platform, &session.title, &md, None)?);
+        exported = Some(write_export(&platform, &id, &session.title, &md, None)?);
     }
 
     let record = delete::remove(&platform, &id, &session)?;
@@ -335,7 +348,7 @@ pub fn sessions_delete_many(
         let attempt = (|| -> Result<(), String> {
             if export_first {
                 let md = sessions::export_markdown(&it.platform, &it.id, &it.title)?;
-                write_export(&it.platform, &it.title, &md, None)?;
+                write_export(&it.platform, &it.id, &it.title, &md, None)?;
             }
             delete::remove(&it.platform, &it.id, it)?;
             store::set_archived(&it.platform, &it.id, false)?;
