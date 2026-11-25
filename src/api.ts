@@ -1,3 +1,8 @@
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { openUrl } from "@tauri-apps/plugin-opener";
+
 export type Session = {
   id: string;
   platform: string;
@@ -51,76 +56,107 @@ export type DirListing = {
   drives: string[];
 };
 
-type DesktopApi = {
-  listSessions: (force?: boolean) => Promise<{ sessions: Session[]; platforms: PlatformInfo[] }>;
-  readSession: (platform: string, id: string) => Promise<Message[]>;
-  exportMarkdown: (platform: string, id: string, title: string) => Promise<string>;
-  exportFile: (
-    platform: string,
-    id: string,
-    title: string,
-    targetPath?: string,
-  ) => Promise<{ path: string; bytes: number }>;
-  reveal: (filePath: string) => Promise<boolean>;
-  listDir: (dirPath?: string) => Promise<DirListing>;
-  mkdir: (parentDir: string, name: string) => Promise<string>;
-  archive: (platform: string, id: string, value: boolean) => Promise<boolean>;
-  archiveMany: (items: { platform: string; id: string }[], value: boolean) => Promise<number>;
-  exportMany: (items: Session[], targetDir?: string) => Promise<{ ok: number; fail: number; dir: string }>;
-  removeMany: (
-    items: Session[],
-    options?: { exportFirst?: boolean },
-  ) => Promise<{ deleted: number; skipped: number; exported: number; errors: string[] }>;
-  remove: (
-    platform: string,
-    id: string,
-    session: Session,
-    options?: { exportFirst?: boolean },
-  ) => Promise<{ record: TrashItem; exported: { path: string; bytes: number } | null }>;
-  trashList: () => Promise<TrashItem[]>;
-  trashRestore: (trashId: string) => Promise<boolean>;
-  trashPurge: (trashId: string) => Promise<boolean>;
-  trashPurgeAll: () => Promise<{ count: number; bytes: number }>;
-  onSessionsUpdated: (
-    cb: (data: { sessions: Session[]; platforms: PlatformInfo[] }) => void,
-  ) => () => void;
-  win: {
-    minimize: () => void;
-    toggleMaximize: () => void;
-    close: () => void;
+export type SessionsPayload = { sessions: Session[]; platforms: PlatformInfo[] };
+
+export const listSessions = (force = false) => invoke<SessionsPayload>("sessions_list", { force });
+
+/**
+ * Rust 端扫描完成后 emit("sessions:updated")。
+ * listen() 是异步的，这里包成同步返回的退订函数，保持原 window.api 的签名。
+ */
+export const onSessionsUpdated = (cb: (data: SessionsPayload) => void) => {
+  let disposed = false;
+  let unlisten: (() => void) | undefined;
+  listen<SessionsPayload>("sessions:updated", (e) => cb(e.payload))
+    .then((off) => {
+      if (disposed) off();
+      else unlisten = off;
+    })
+    .catch(() => {
+      /* 监听失败时列表仍能靠手动刷新工作 */
+    });
+  return () => {
+    disposed = true;
+    unlisten?.();
   };
 };
 
-declare global {
-  interface Window {
-    api: DesktopApi;
-  }
-}
-
-export const listSessions = (force = false) => window.api.listSessions(force);
-export const onSessionsUpdated = (cb: (data: { sessions: Session[]; platforms: PlatformInfo[] }) => void) =>
-  window.api.onSessionsUpdated(cb);
-export const readSession = (platform: string, id: string) => window.api.readSession(platform, id);
+export const readSession = (platform: string, id: string) =>
+  invoke<Message[]>("sessions_read", { platform, id });
 export const exportMarkdown = (platform: string, id: string, title: string) =>
-  window.api.exportMarkdown(platform, id, title);
+  invoke<string>("sessions_export", { platform, id, title });
 export const exportFile = (platform: string, id: string, title: string, targetPath?: string) =>
-  window.api.exportFile(platform, id, title, targetPath);
-export const reveal = (filePath: string) => window.api.reveal(filePath);
-export const listDir = (dirPath?: string) => window.api.listDir(dirPath);
-export const mkdir = (parentDir: string, name: string) => window.api.mkdir(parentDir, name);
-export const archive = (platform: string, id: string, value: boolean) => window.api.archive(platform, id, value);
+  invoke<{ path: string; bytes: number }>("file_export", { platform, id, title, targetPath });
+export const reveal = (filePath: string) => invoke<boolean>("file_reveal", { filePath });
+export const listDir = (dirPath?: string) => invoke<DirListing>("fs_list_dir", { dirPath });
+export const mkdir = (parentDir: string, name: string) =>
+  invoke<string>("fs_mkdir", { parentDir, name });
+export const archive = (platform: string, id: string, value: boolean) =>
+  invoke<boolean>("sessions_archive", { platform, id, value });
 export const archiveMany = (items: { platform: string; id: string }[], value: boolean) =>
-  window.api.archiveMany(items, value);
-export const exportMany = (items: Session[], targetDir?: string) => window.api.exportMany(items, targetDir);
+  invoke<number>("sessions_archive_many", { items, value });
+export const exportMany = (items: Session[], targetDir?: string) =>
+  invoke<{ ok: number; fail: number; dir: string }>("sessions_export_many", { items, targetDir });
 export const removeMany = (items: Session[], options?: { exportFirst?: boolean }) =>
-  window.api.removeMany(items, options);
+  invoke<{ deleted: number; skipped: number; exported: number; errors: string[] }>(
+    "sessions_delete_many",
+    { items, options },
+  );
 export const remove = (
   platform: string,
   id: string,
   session: Session,
   options?: { exportFirst?: boolean },
-) => window.api.remove(platform, id, session, options);
-export const trashList = () => window.api.trashList();
-export const trashRestore = (trashId: string) => window.api.trashRestore(trashId);
-export const trashPurge = (trashId: string) => window.api.trashPurge(trashId);
-export const trashPurgeAll = () => window.api.trashPurgeAll();
+) =>
+  invoke<{ record: TrashItem; exported: { path: string; bytes: number } | null }>("sessions_delete", {
+    platform,
+    id,
+    session,
+    options,
+  });
+export const trashList = () => invoke<TrashItem[]>("trash_list");
+export const trashRestore = (trashId: string) => invoke<boolean>("trash_restore", { trashId });
+export const trashPurge = (trashId: string) => invoke<boolean>("trash_purge", { trashId });
+export const trashPurgeAll = () => invoke<{ count: number; bytes: number }>("trash_purge_all");
+
+/** 自绘标题栏按钮：直接操作当前窗口 */
+export const win = {
+  minimize: () => void getCurrentWindow().minimize(),
+  toggleMaximize: () => {
+    const w = getCurrentWindow();
+    void (async () => {
+      if (await w.isMaximized()) await w.unmaximize();
+      else await w.maximize();
+    })();
+  },
+  close: () => void getCurrentWindow().close(),
+};
+
+/** 无边框窗口的标题栏拖拽：单击拖动、双击切换最大化（按钮区除外） */
+export function startWindowDrag(e: { button: number; detail: number; target: EventTarget | null }) {
+  if (e.button !== 0) return;
+  const el = e.target as HTMLElement | null;
+  if (el?.closest(".winbtn")) return;
+  if (e.detail === 2) win.toggleMaximize();
+  else void getCurrentWindow().startDragging();
+}
+
+/**
+ * 预览里的 http(s) 链接一律交给系统浏览器，避免 WebView2 把主窗口导航走。
+ * 捕获阶段拦截，Markdown 是 dangerouslySetInnerHTML 渲染的，没法逐个加 handler。
+ */
+export function installExternalLinkHandler() {
+  const onClick = (e: MouseEvent) => {
+    const a = (e.target as HTMLElement | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
+    if (!a) return;
+    const href = a.getAttribute("href") || "";
+    if (!/^https?:\/\//i.test(href)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void openUrl(href).catch(() => {
+      /* 打开失败不影响界面 */
+    });
+  };
+  document.addEventListener("click", onClick, true);
+  document.addEventListener("auxclick", onClick, true);
+}

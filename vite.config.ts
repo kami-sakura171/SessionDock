@@ -16,5 +16,8 @@ export default defineConfig({
     target: "chrome130",
     minify: "esbuild",
     sourcemap: false,
+    // 不让 Vite 构建时整体 rm -rf dist：本机有批量删除保护会拦截；
+    // 旧产物用 scripts/clean-dist.cjs 逐文件清理
+    emptyOutDir: false,
   },
 });

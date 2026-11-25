@@ -1,0 +1,13 @@
+# 迁移约束：只用 Rust GNU 工具链（不装 VS C++ Build Tools），产物落 E 盘。
+[build]
+target = "x86_64-pc-windows-gnu"
+target-dir = "E:/DevTools/target"
+
+# 关键：PATH 里必须有 D:\mingw64\bin（windres 要调 gcc 预处理、dlltool 生成导入库、
+# cc 编译 sqlite3.c），但绝不能让 rustc 用那个老 gcc 当链接器 —— 它会拖来
+# 老 mingw-w64 CRT / 导入库，产出引用 msvcrt!__intrinsic_setjmp、kernel32!WaitOnAddress
+# 这些本机不存在入口点的程序（一启动就 STATUS_ENTRYPOINT_NOT_FOUND）。
+# 所以显式指定 Rust 自包含链接器 + 自包含库。
+[target.x86_64-pc-windows-gnu]
+linker = "E:/DevTools/rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/self-contained/x86_64-w64-mingw32-gcc.exe"
+rustflags = ["-C", "link-self-contained=yes"]

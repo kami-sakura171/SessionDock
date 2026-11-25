@@ -6,11 +6,14 @@ import {
   exportMarkdown,
   exportMany,
   listSessions,
+  onSessionsUpdated,
   readSession,
   exportFile,
   remove,
   removeMany,
   reveal,
+  startWindowDrag,
+  win,
   trashList,
   trashPurge,
   trashPurgeAll,
@@ -30,6 +33,7 @@ const PLATFORM_COLOR: Record<string, string> = {
   pi: "#6f7fa8",
   vscode: "#4f7d7a",
   kiro: "#a3607a",
+  deepseek: "#4d6bfe",
 };
 
 const fmtTime = (ms: number | null) => {
@@ -66,6 +70,21 @@ export default function App() {
   const [drawerWidth, setDrawerWidth] = useState<number>(() => {
     const saved = Number(localStorage.getItem("drawerWidth"));
     return Number.isFinite(saved) && saved >= 320 ? saved : 460;
+  });
+  const DEFAULT_COLS = { platform: 144, project: 160, messages: 58, updatedAt: 132, status: 72 };
+  const [colWidths, setColWidths] = useState<typeof DEFAULT_COLS>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("colWidths") || "{}");
+      return {
+        platform: Number(saved.platform) >= 72 ? Number(saved.platform) : DEFAULT_COLS.platform,
+        project: Number(saved.project) >= 72 ? Number(saved.project) : DEFAULT_COLS.project,
+        messages: Number(saved.messages) >= 48 ? Number(saved.messages) : DEFAULT_COLS.messages,
+        updatedAt: Number(saved.updatedAt) >= 90 ? Number(saved.updatedAt) : DEFAULT_COLS.updatedAt,
+        status: Number(saved.status) >= 56 ? Number(saved.status) : DEFAULT_COLS.status,
+      };
+    } catch {
+      return DEFAULT_COLS;
+    }
   });
   const [exportFirst, setExportFirst] = useState(true);
   const [batch, setBatch] = useState(false);
@@ -113,7 +132,7 @@ export default function App() {
 
   // 后台扫描完成后主进程会推送最新结果，替换掉启动时用的快照
   useEffect(() => {
-    const off = window.api.onSessionsUpdated((data) => {
+    const off = onSessionsUpdated((data) => {
       setSessions(data.sessions);
       setPlatforms(data.platforms);
       setLoading(false);
@@ -187,6 +206,67 @@ export default function App() {
       document.body.classList.remove("resizing");
       if (guide) guide.style.display = "none";
       setDrawerWidth(nextWidth);
+    };
+
+    document.body.classList.add("resizing");
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  useEffect(() => {
+    localStorage.setItem("colWidths", JSON.stringify(colWidths));
+  }, [colWidths]);
+
+  function startResizeCol(
+    leftKey: keyof typeof DEFAULT_COLS | "title",
+    rightKey: keyof typeof DEFAULT_COLS,
+    e: ReactMouseEvent<HTMLDivElement>,
+  ) {
+    e.preventDefault();
+    e.stopPropagation();
+    const resizer = e.currentTarget;
+    const leftTh = resizer.parentElement as HTMLTableCellElement | null;
+    const rightTh = leftTh?.nextElementSibling as HTMLTableCellElement | null;
+    if (!leftTh || !rightTh) return;
+
+    const minOf = (k: keyof typeof DEFAULT_COLS | "title") =>
+      k === "messages" ? 48 : k === "status" ? 56 : k === "title" ? 120 : 72;
+
+    const startX = e.clientX;
+    const startLeftW = leftTh.offsetWidth;
+    const startRightW = rightTh.offsetWidth;
+    const minLeft = minOf(leftKey);
+    const minRight = minOf(rightKey);
+
+    let nextLeftW = startLeftW;
+    let nextRightW = startRightW;
+    let raf = 0;
+
+    const apply = () => {
+      raf = 0;
+      if (leftKey !== "title") leftTh.style.width = `${nextLeftW}px`;
+      rightTh.style.width = `${nextRightW}px`;
+    };
+    const onMove = (ev: MouseEvent) => {
+      const rawDx = ev.clientX - startX;
+      // 限制在左右两列各自最小宽度范围内，保持两列总宽恒定，分割线严格跟手
+      const dx = Math.min(Math.max(rawDx, -(startLeftW - minLeft)), startRightW - minRight);
+      nextLeftW = startLeftW + dx;
+      nextRightW = startRightW - dx;
+      if (!raf) raf = window.requestAnimationFrame(apply);
+    };
+    const onUp = () => {
+      if (raf) window.cancelAnimationFrame(raf);
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.classList.remove("resizing");
+      if (leftKey !== "title") leftTh.style.width = `${nextLeftW}px`;
+      rightTh.style.width = `${nextRightW}px`;
+      setColWidths((prev) => ({
+        ...prev,
+        ...(leftKey !== "title" ? { [leftKey]: nextLeftW } : {}),
+        [rightKey]: nextRightW,
+      }));
     };
 
     document.body.classList.add("resizing");
@@ -275,10 +355,16 @@ export default function App() {
   function jumpTo(index: number) {
     const body = bodyRef.current;
     if (!body) return;
-    manualJumpUntil.current = Date.now() + 550;
+    manualJumpUntil.current = Date.now() + 200;
     setActiveIdx(index);
     const el = body.querySelector(`[data-idx="${index}"]`) as HTMLElement | null;
-    el?.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (!el) return;
+    // content-visibility: auto 下长距离 smooth 滚动会因沿途元素展开导致停在半路，
+    // 改为先立即跳过去触发视口排版，下一帧再二次校准对齐
+    el.scrollIntoView({ behavior: "auto", block: "start" });
+    window.requestAnimationFrame(() => {
+      el.scrollIntoView({ behavior: "auto", block: "start" });
+    });
   }
 
   /** 刻度轨按整数像素居中：半像素会让 2px 的刻度被抗锯齿糊成 3px */
@@ -455,14 +541,14 @@ export default function App() {
 
   return (
     <div className="app">
-      <div className="titlebar">
+      <div className="titlebar" onMouseDown={startWindowDrag}>
         <div className="brand">
           SessionDock <span>本机 AI 会话统一管理</span>
         </div>
         <div style={{ flex: 1, height: "100%" }} />
-        <button className="winbtn" onClick={() => window.api.win.minimize()} title="最小化">—</button>
-        <button className="winbtn" onClick={() => window.api.win.toggleMaximize()} title="最大化">□</button>
-        <button className="winbtn close" onClick={() => window.api.win.close()} title="关闭">✕</button>
+        <button className="winbtn" onClick={() => win.minimize()} title="最小化">—</button>
+        <button className="winbtn" onClick={() => win.toggleMaximize()} title="最大化">□</button>
+        <button className="winbtn close" onClick={() => win.close()} title="关闭">✕</button>
       </div>
 
       <div className="body">
@@ -474,19 +560,20 @@ export default function App() {
             <span className="count">{total}</span>
           </div>
 
-          {platforms.map((p) => (
-            <div
-              key={p.platform}
-              className={`platform ${platform === p.platform ? "active" : ""}`}
-              onClick={() => setPlatform(p.platform)}
-              style={{ opacity: p.count === 0 ? 0.45 : 1 }}
-              title={p.error ? `读取异常：${p.error}` : undefined}
-            >
-              <span className="dot" style={{ background: PLATFORM_COLOR[p.platform] ?? "#a89e8e" }} />
-              <span className="name">{p.label}</span>
-              <span className="count">{p.count}</span>
-            </div>
-          ))}
+          {platforms
+            .filter((p) => p.count > 0 || platform === p.platform)
+            .map((p) => (
+              <div
+                key={p.platform}
+                className={`platform ${platform === p.platform ? "active" : ""}`}
+                onClick={() => setPlatform(p.platform)}
+                title={p.error ? `读取异常：${p.error}` : undefined}
+              >
+                <span className="dot" style={{ background: PLATFORM_COLOR[p.platform] ?? "#a89e8e" }} />
+                <span className="name">{p.label}</span>
+                <span className="count">{p.count}</span>
+              </div>
+            ))}
 
           <div style={{ flex: 1 }} />
           <div className="platform" onClick={() => setShowTrash(true)}>
@@ -617,12 +704,52 @@ export default function App() {
                       />
                     </th>
                   )}
-                  <th style={{ width: "42%" }}>标题</th>
-                  <th style={{ width: 96 }}>平台</th>
-                  <th>项目</th>
-                  <th style={{ width: 56 }}>消息</th>
-                  <th style={{ width: 128 }}>更新时间</th>
-                  <th style={{ width: 72 }}>状态</th>
+                  <th>
+                    标题
+                    <div
+                      className="col-resizer"
+                      onMouseDown={(e) => startResizeCol("title", "platform", e)}
+                      onDoubleClick={() => setColWidths(DEFAULT_COLS)}
+                      title="拖动调整列宽，双击重置全部列宽"
+                    />
+                  </th>
+                  <th style={{ width: colWidths.platform }}>
+                    平台
+                    <div
+                      className="col-resizer"
+                      onMouseDown={(e) => startResizeCol("platform", "project", e)}
+                      onDoubleClick={() => setColWidths(DEFAULT_COLS)}
+                      title="拖动调整列宽，双击重置全部列宽"
+                    />
+                  </th>
+                  <th style={{ width: colWidths.project }}>
+                    项目
+                    <div
+                      className="col-resizer"
+                      onMouseDown={(e) => startResizeCol("project", "messages", e)}
+                      onDoubleClick={() => setColWidths(DEFAULT_COLS)}
+                      title="拖动调整列宽，双击重置全部列宽"
+                    />
+                  </th>
+                  <th style={{ width: colWidths.messages }}>
+                    消息
+                    <div
+                      className="col-resizer"
+                      onMouseDown={(e) => startResizeCol("messages", "updatedAt", e)}
+                      onDoubleClick={() => setColWidths(DEFAULT_COLS)}
+                      title="拖动调整列宽，双击重置全部列宽"
+                    />
+                  </th>
+                  <th style={{ width: colWidths.updatedAt }}>
+                    更新时间
+                    <div
+                      className="col-resizer"
+                      onMouseDown={(e) => startResizeCol("updatedAt", "status", e)}
+                      onDoubleClick={() => setColWidths(DEFAULT_COLS)}
+                      title="拖动调整列宽，双击重置全部列宽"
+                    />
+                  </th>
+                  <th style={{ width: colWidths.status }}>状态</th>
                 </tr>
               </thead>
               <tbody>

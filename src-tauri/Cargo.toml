@@ -1,0 +1,38 @@
+[package]
+name = "session-dock"
+version = "0.2.0"
+description = "SessionDock — Unified local session manager for AI coding agents"
+authors = ["Yan"]
+edition = "2021"
+
+[lib]
+name = "session_dock_lib"
+# 纯桌面应用：cdylib 只给移动端用，而且在 GNU 工具链下会因导出序号过大而链接失败
+crate-type = ["staticlib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+session-dock-core = { path = "core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1.13.2"
+chrono = "0.4.45"
+
+[workspace]
+members = ["core"]
+
+[features]
+# Tauri 的自定义协议仅在生产构建开启，dev 走 localhost:1420
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+# 本机 MinGW strip 2.30 重写 exe 后会被安全软件/沙箱拒绝执行，改为不剥离符号
+strip = false

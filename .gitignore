@@ -1,6 +1,11 @@
 node_modules/
 dist/
 release/
+.workbuddy/
+
+# Rust 产物统一放 E:\DevTools\target，这里仅兜底
+src-tauri/target/
+src-tauri/gen/
 
 # Local preview / screenshot scratch files
 .*-preview.html

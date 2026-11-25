@@ -1,16 +1,20 @@
 {
   "name": "session-dock",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
-  "description": "SessionDock — Unified local session manager for AI coding agents",
-  "main": "electron/main.js",
+  "description": "SessionDock — Unified local session manager for AI coding agents (Tauri 2 + Rust)",
+  "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n vite,electron -c cyan,magenta \"vite\" \"wait-on tcp:1420 && electron .\"",
+    "dev:vite": "vite",
+    "dev": "node scripts/tauri.mjs dev",
     "build": "tsc --noEmit && vite build",
-    "start": "electron .",
-    "dist": "npm run build && electron-builder --win nsis"
+    "tauri": "node scripts/tauri.mjs",
+    "dist": "node scripts/tauri.mjs build",
+    "icons": "node scripts/tauri.mjs icon assets/icon.png"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2",
     "dompurify": "^3.5.0",
     "highlight.js": "^11.12.0",
     "katex": "^0.19.1",
@@ -19,47 +23,12 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
-    "concurrently": "^9.1.0",
-    "electron": "^38.0.0",
-    "electron-builder": "^25.1.8",
-    "jsdom": "^31.0.1",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11",
-    "wait-on": "^8.0.1"
-  },
-  "build": {
-    "appId": "com.yan.sessiondock",
-    "productName": "SessionDock",
-    "directories": {
-      "output": "release"
-    },
-    "files": [
-      "dist/**/*",
-      "electron/**/*",
-      "assets/icon.png",
-      "package.json"
-    ],
-    "win": {
-      "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        }
-      ],
-      "icon": "assets/icon.png",
-      "signAndEditExecutable": false
-    },
-    "nsis": {
-      "oneClick": false,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": true,
-      "shortcutName": "SessionDock"
-    }
+    "vite": "^5.4.11"
   },
   "author": {
     "name": "Yan",
